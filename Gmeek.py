@@ -509,6 +509,481 @@ blog.blogBase["postListJson"]["labelColorDict"]=blog.labelColorDict
 docListFile=open(blog.root_dir+"postList.json","w")
 docListFile.write(json.dumps(blog.blogBase["postListJson"]))
 docListFile.close()
+############################################################################################################################################################################
+class GMEEK():
+    def __init__(self,options):
+        self.options=options
+        
+        self.root_dir='docs/'
+        self.static_dir='static/'
+        self.post_folder='post/'
+        self.backup_dir='backup/'
+        self.post_dir=self.root_dir+self.post_folder
+
+        user = Github(self.options.github_token)
+        self.repo = self.get_repo(user, options.repo_name)
+        self.feed = FeedGenerator()
+        self.oldFeedString=''
+
+        self.labelColorDict=json.loads('{}')
+        for label in self.repo.get_labels():
+            self.labelColorDict[label.name]='#'+label.color
+        print(self.labelColorDict)
+        self.defaultConfig()
+        
+    def cleanFile(self):
+        workspace_path = os.environ.get('GITHUB_WORKSPACE')
+        if os.path.exists(workspace_path+"/"+self.backup_dir):
+            shutil.rmtree(workspace_path+"/"+self.backup_dir)
+
+        if os.path.exists(workspace_path+"/"+self.root_dir):
+            shutil.rmtree(workspace_path+"/"+self.root_dir)
+
+        if os.path.exists(self.backup_dir):
+            shutil.rmtree(self.backup_dir)
+            
+        if os.path.exists(self.root_dir):
+            shutil.rmtree(self.root_dir)
+
+        os.mkdir(self.backup_dir)
+        os.mkdir(self.root_dir)
+        os.mkdir(self.post_dir)
+
+        if os.path.exists(self.static_dir):
+            for item in os.listdir(self.static_dir):
+                src = os.path.join(self.static_dir, item)
+                dst = os.path.join(self.root_dir, item)
+                if os.path.isfile(src):
+                    shutil.copy(src, dst)
+                    print(f"Copied {item} to docs")
+                elif os.path.isdir(src):
+                    shutil.copytree(src, dst)
+                    print(f"Copied directory {item} to docs")
+        else:
+            print("static does not exist")
+
+    def defaultConfig(self):
+        dconfig={"singlePage":[],"startSite":"","filingNum":"","onePageListNum":15,"commentLabelColor":"#006b75","yearColorList":["#bc4c00", "#0969da", "#1f883d", "#A333D0"],"i18n":"CN","themeMode":"manual","dayTheme":"light","nightTheme":"dark","urlMode":"pinyin","script":"","style":"","head":"","indexScript":"","indexStyle":"","bottomText":"","showPostSource":1,"iconList":{},"UTC":+8,"rssSplit":"sentence","exlink":{},"needComment":1,"allHead":""}
+        config=json.loads(open('config.json', 'r', encoding='utf-8').read())
+        self.blogBase={**dconfig,**config}.copy()
+        self.blogBase["postListJson"]=json.loads('{}')
+        self.blogBase["singeListJson"]=json.loads('{}')
+        self.blogBase["labelColorDict"]=self.labelColorDict
+        if "displayTitle" not in self.blogBase:
+            self.blogBase["displayTitle"]=self.blogBase["title"]
+
+        if "faviconUrl" not in self.blogBase:
+            self.blogBase["faviconUrl"]=self.blogBase["avatarUrl"]
+
+        if "ogImage" not in self.blogBase:
+            self.blogBase["ogImage"]=self.blogBase["avatarUrl"]
+
+        if "primerCSS" not in self.blogBase:
+            self.blogBase["primerCSS"]="<link href='https://mirrors.sustech.edu.cn/cdnjs/ajax/libs/Primer/21.0.7/primer.css' rel='stylesheet' />"
+
+        if "homeUrl" not in self.blogBase:
+            if str(self.repo.name).lower() == (str(self.repo.owner.login) + ".github.io").lower():
+                self.blogBase["homeUrl"] = f"https://{self.repo.name}"
+            else:
+                self.blogBase["homeUrl"] = f"https://{self.repo.owner.login}.github.io/{self.repo.name}"
+        print("GitHub Pages URL: ", self.blogBase["homeUrl"])
+
+        if self.blogBase["i18n"]=="CN":
+            self.i18n=i18nCN
+        elif self.blogBase["i18n"]=="RU":
+            self.i18n=i18nRU
+        else:
+            self.i18n=i18n
+        
+        self.TZ=datetime.timezone(datetime.timedelta(hours=self.blogBase["UTC"]))
+
+    def get_repo(self,user:Github, repo:str):
+        return user.get_repo(repo)
+
+    def markdown2html(self, mdstr):
+        payload = {"text": mdstr, "mode": "gfm"}
+        headers = {"Authorization": "token {}".format(self.options.github_token)}
+        try:
+            response = requests.post("https://api.github.com/markdown", json=payload, headers=headers)
+            response.raise_for_status()  # Raises an exception if status code is not 200
+            return response.text
+        except requests.RequestException as e:
+            raise Exception("markdown2html error: {}".format(e))
+
+    def renderHtml(self,template,blogBase,postListJson,htmlDir,icon):
+        file_loader = FileSystemLoader('templates')
+        env = Environment(loader=file_loader)
+        template = env.get_template(template)
+        output = template.render(blogBase=blogBase,postListJson=postListJson,i18n=self.i18n,IconList=icon)
+        f = open(htmlDir, 'w', encoding='UTF-8')
+        f.write(output)
+        f.close()
+
+    def createPostHtml(self,issue):
+        mdFileName=re.sub(r'[<>:/\\|?*\"]|[\0-\31]', '-', issue["postTitle"])
+        f = open(self.backup_dir+mdFileName+".md", 'r', encoding='UTF-8')
+        post_body=self.markdown2html(f.read())
+        f.close()
+
+        postBase=self.blogBase.copy()
+
+        if '<math-renderer' in post_body:
+            post_body=re.sub(r'<math-renderer.*?>','',post_body)
+            post_body=re.sub(r'</math-renderer>','',post_body)
+            issue["script"]=issue["script"]+'<script>MathJax = {tex: {inlineMath: [["$", "$"]]}};</script><script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>'
+        
+        if '<p class="markdown-alert-title">' in post_body:
+            issue["style"]=issue["style"]+'<style>.markdown-alert{padding:0.5rem 1rem;margin-bottom:1rem;border-left:.25em solid var(--borderColor-default,var(--color-border-default));}.markdown-alert .markdown-alert-title {display:flex;font-weight:var(--base-text-weight-medium,500);align-items:center;line-height:1;}.markdown-alert>:first-child {margin-top:0;}.markdown-alert>:last-child {margin-bottom:0;}</style>'
+            alerts = {
+                'note': 'accent',
+                'tip': 'success',
+                'important': 'done',
+                'warning': 'attention',
+                'caution': 'danger'
+            }
+
+            for alert, style in alerts.items():
+                if f'markdown-alert-{alert}' in post_body:
+                    issue["style"] += (
+                        f'<style>.markdown-alert.markdown-alert-{alert} {{'
+                        f'border-left-color:var(--borderColor-{style}-emphasis, var(--color-{style}-emphasis));'
+                        f'background-color:var(--color-{style}-subtle);}}'
+                        f'.markdown-alert.markdown-alert-{alert} .markdown-alert-title {{'
+                        f'color: var(--fgColor-{style},var(--color-{style}-fg));}}</style>'
+                    )
+
+        if '<code class="notranslate">Gmeek-html' in post_body:
+            post_body = re.sub(r'<code class="notranslate">Gmeek-html(.*?)</code>', lambda match: html.unescape(match.group(1)), post_body, flags=re.DOTALL)
+
+        postBase["postTitle"]=issue["postTitle"]
+        postBase["postUrl"]=self.blogBase["homeUrl"]+"/"+issue["postUrl"]
+        postBase["description"]=issue["description"]
+        postBase["ogImage"]=issue["ogImage"]
+        postBase["postBody"]=post_body
+        postBase["commentNum"]=issue["commentNum"]
+        postBase["style"]=issue["style"]
+        postBase["script"]=issue["script"]
+        postBase["head"]=issue["head"]
+        postBase["top"]=issue["top"]
+        postBase["postSourceUrl"]=issue["postSourceUrl"]
+        postBase["repoName"]=options.repo_name
+        
+        if issue["labels"][0] in self.blogBase["singlePage"]:
+            postBase["bottomText"]=''
+
+        if '<pre class="notranslate">' in post_body:
+            keys=['sun','moon','sync','home','github','copy','check']
+            if '<div class="highlight' in post_body:
+                postBase["highlight"]=1
+            else:
+                postBase["highlight"]=2
+        else:
+            keys=['sun','moon','sync','home','github']
+            postBase["highlight"]=0
+
+        postIcon=dict(zip(keys, map(IconBase.get, keys)))
+        self.renderHtml('post.html',postBase,{},issue["htmlDir"],postIcon)
+        print("create postPage title=%s file=%s " % (issue["postTitle"],issue["htmlDir"]))
+
+    def createPlistHtml(self):
+        self.blogBase["postListJson"]=dict(sorted(self.blogBase["postListJson"].items(),key=lambda x:(x[1]["top"],x[1]["createdAt"]),reverse=True))#使列表由时间排序
+        keys=list(OrderedDict.fromkeys(['sun', 'moon','sync', 'search', 'rss', 'upload', 'post'] + self.blogBase["singlePage"]))
+        plistIcon={**dict(zip(keys, map(IconBase.get, keys))),**self.blogBase["iconList"]}
+        keys=['sun','moon','sync','home','search','post']
+        tagIcon=dict(zip(keys, map(IconBase.get, keys)))
+
+        postNum=len(self.blogBase["postListJson"])
+        pageFlag=0
+        while True:
+            topNum=pageFlag*self.blogBase["onePageListNum"]
+            print("topNum=%d postNum=%d"%(topNum,postNum))
+            if postNum<=self.blogBase["onePageListNum"]:
+                if pageFlag==0:
+                    onePageList=dict(list(self.blogBase["postListJson"].items())[:postNum])
+                    htmlDir=self.root_dir+"index.html"
+                    self.blogBase["prevUrl"]="disabled"
+                    self.blogBase["nextUrl"]="disabled"
+                else:
+                    onePageList=dict(list(self.blogBase["postListJson"].items())[topNum:topNum+postNum])
+                    htmlDir=self.root_dir+("page%d.html" % (pageFlag+1))
+                    if pageFlag==1:
+                        self.blogBase["prevUrl"]="/index.html"
+                    else:
+                        self.blogBase["prevUrl"]="/page%d.html" % pageFlag
+                    self.blogBase["nextUrl"]="disabled"
+
+                self.renderHtml('plist.html',self.blogBase,onePageList,htmlDir,plistIcon)
+                print("create "+htmlDir)
+                break
+            else:
+                onePageList=dict(list(self.blogBase["postListJson"].items())[topNum:topNum+self.blogBase["onePageListNum"]])
+                postNum=postNum-self.blogBase["onePageListNum"]
+                if pageFlag==0:
+                    htmlDir=self.root_dir+"index.html"
+                    self.blogBase["prevUrl"]="disabled"
+                    self.blogBase["nextUrl"]="/page2.html"
+                else:
+                    htmlDir=self.root_dir+("page%d.html" % (pageFlag+1))
+                    if pageFlag==1:
+                        self.blogBase["prevUrl"]="/index.html"
+                    else:
+                        self.blogBase["prevUrl"]="/page%d.html" % pageFlag
+                    self.blogBase["nextUrl"]="/page%d.html" % (pageFlag+2)
+
+                self.renderHtml('plist.html',self.blogBase,onePageList,htmlDir,plistIcon)
+                print("create "+htmlDir)
+
+            pageFlag=pageFlag+1
+
+        self.renderHtml('tag.html',self.blogBase,onePageList,self.root_dir+"tag.html",tagIcon)
+        print("create tag.html")
+
+    def createFeedXml(self):
+        self.blogBase["postListJson"]=dict(sorted(self.blogBase["postListJson"].items(),key=lambda x:x[1]["createdAt"],reverse=False))#使列表由时间排序
+        feed = FeedGenerator()
+        feed.title(self.blogBase["title"])
+        feed.description(self.blogBase["subTitle"])
+        feed.link(href=self.blogBase["homeUrl"])
+        feed.image(url=self.blogBase["avatarUrl"],title="avatar", link=self.blogBase["homeUrl"])
+        feed.copyright(self.blogBase["title"])
+        feed.managingEditor(self.blogBase["title"])
+        feed.webMaster(self.blogBase["title"])
+        feed.ttl("60")
+
+        for num in self.blogBase["singeListJson"]:
+            item=feed.add_item()
+            item.guid(self.blogBase["homeUrl"]+"/"+self.blogBase["singeListJson"][num]["postUrl"],permalink=True)
+            item.title(self.blogBase["singeListJson"][num]["postTitle"])
+            item.description(self.blogBase["singeListJson"][num]["description"])
+            item.link(href=self.blogBase["homeUrl"]+"/"+self.blogBase["singeListJson"][num]["postUrl"])
+            item.pubDate(time.strftime("%a, %d %b %Y %H:%M:%S +0000", time.gmtime(self.blogBase["singeListJson"][num]["createdAt"])))
+
+        for num in self.blogBase["postListJson"]:
+            item=feed.add_item()
+            item.guid(self.blogBase["homeUrl"]+"/"+self.blogBase["postListJson"][num]["postUrl"],permalink=True)
+            item.title(self.blogBase["postListJson"][num]["postTitle"])
+            item.description(self.blogBase["postListJson"][num]["description"])
+            item.link(href=self.blogBase["homeUrl"]+"/"+self.blogBase["postListJson"][num]["postUrl"])
+            item.pubDate(time.strftime("%a, %d %b %Y %H:%M:%S +0000", time.gmtime(self.blogBase["postListJson"][num]["createdAt"])))
+
+        if self.oldFeedString!='':
+            feed.rss_file(self.root_dir+'new.xml')
+            newFeed=open(self.root_dir+'new.xml','r',encoding='utf-8')
+            new=newFeed.read()
+            newFeed.close()
+
+            new=re.sub(r'<lastBuildDate>.*?</lastBuildDate>','',new)
+            old=re.sub(r'<lastBuildDate>.*?</lastBuildDate>','',self.oldFeedString)
+            os.remove(self.root_dir+'new.xml')
+            
+            if new==old:
+                print("====== rss xml no update ======")
+                feedFile=open(self.root_dir+'rss.xml',"w")
+                feedFile.write(self.oldFeedString)
+                feedFile.close()
+                return
+
+        print("====== create rss xml ======")
+        feed.rss_file(self.root_dir+'rss.xml')
+
+    def addOnePostJson(self,issue):
+        if len(issue.labels)>=1:
+            if issue.labels[0].name in self.blogBase["singlePage"]:
+                listJsonName='singeListJson'
+                htmlFile='{}.html'.format(self.createFileName(issue,useLabel=True))
+                gen_Html = self.root_dir+htmlFile
+            else:
+                listJsonName='postListJson'
+                htmlFile='{}.html'.format(self.createFileName(issue))
+                gen_Html = self.post_dir+htmlFile
+
+            postNum="P"+str(issue.number)
+            self.blogBase[listJsonName][postNum]=json.loads('{}')
+            self.blogBase[listJsonName][postNum]["htmlDir"]=gen_Html
+            self.blogBase[listJsonName][postNum]["labels"]=[label.name for label in issue.labels]
+            self.blogBase[listJsonName][postNum]["postTitle"]=issue.title
+            self.blogBase[listJsonName][postNum]["postUrl"]=urllib.parse.quote(gen_Html[len(self.root_dir):])
+
+            self.blogBase[listJsonName][postNum]["postSourceUrl"]="https://github.com/"+options.repo_name+"/issues/"+str(issue.number)
+            self.blogBase[listJsonName][postNum]["commentNum"]=issue.get_comments().totalCount
+
+            if issue.body==None:
+                self.blogBase[listJsonName][postNum]["description"]=''
+                self.blogBase[listJsonName][postNum]["wordCount"]=0
+            else:
+                self.blogBase[listJsonName][postNum]["wordCount"]=len(issue.body)
+                if self.blogBase["rssSplit"]=="sentence":
+                    if self.blogBase["i18n"]=="CN":
+                        period="。"
+                    else:
+                        period="."
+                else:
+                    period=self.blogBase["rssSplit"]
+                self.blogBase[listJsonName][postNum]["description"]=issue.body.split(period)[0].replace("\"", "\'")+period
+                
+            self.blogBase[listJsonName][postNum]["top"]=0
+            for event in issue.get_events():
+                if event.event=="pinned":
+                    self.blogBase[listJsonName][postNum]["top"]=1
+                elif event.event=="unpinned":
+                    self.blogBase[listJsonName][postNum]["top"]=0
+
+            try:
+                postConfig=json.loads(issue.body.split("\r\n")[-1:][0].split("##")[1])
+                print("Has Custom JSON parameters")
+                print(postConfig)
+            except:
+                postConfig={}
+
+            if "timestamp" in postConfig:
+                self.blogBase[listJsonName][postNum]["createdAt"]=postConfig["timestamp"]
+            else:
+                self.blogBase[listJsonName][postNum]["createdAt"]=int(time.mktime(issue.created_at.timetuple()))
+            
+            if "style" in postConfig:
+                self.blogBase[listJsonName][postNum]["style"]=self.blogBase["style"]+str(postConfig["style"])
+            else:
+                self.blogBase[listJsonName][postNum]["style"]=self.blogBase["style"]
+
+            if "script" in postConfig:
+                self.blogBase[listJsonName][postNum]["script"]=self.blogBase["script"]+str(postConfig["script"])
+            else:
+                self.blogBase[listJsonName][postNum]["script"]=self.blogBase["script"]
+
+            if "head" in postConfig:
+                self.blogBase[listJsonName][postNum]["head"]=self.blogBase["head"]+str(postConfig["head"])
+            else:
+                self.blogBase[listJsonName][postNum]["head"]=self.blogBase["head"]
+
+            if "ogImage" in postConfig:
+                self.blogBase[listJsonName][postNum]["ogImage"]=postConfig["ogImage"]
+            else:
+                self.blogBase[listJsonName][postNum]["ogImage"]=self.blogBase["ogImage"]
+
+            thisTime=datetime.datetime.fromtimestamp(self.blogBase[listJsonName][postNum]["createdAt"])
+            thisTime=thisTime.astimezone(self.TZ)
+            thisYear=thisTime.year
+            self.blogBase[listJsonName][postNum]["createdDate"]=thisTime.strftime("%Y-%m-%d")
+            self.blogBase[listJsonName][postNum]["dateLabelColor"]=self.blogBase["yearColorList"][int(thisYear)%len(self.blogBase["yearColorList"])]
+
+            mdFileName=re.sub(r'[<>:/\\|?*\"]|[\0-\31]', '-', issue.title)
+            f = open(self.backup_dir+mdFileName+".md", 'w', encoding='UTF-8')
+            
+            if issue.body==None:
+                f.write('')
+            else:
+                f.write(issue.body)
+            f.close()
+            return listJsonName
+
+    def runAll(self):
+        print("====== start create static html ======")
+        self.cleanFile()
+
+        issues=self.repo.get_issues()
+        for issue in issues:
+            self.addOnePostJson(issue)
+
+        for issue in self.blogBase["postListJson"].values():
+            self.createPostHtml(issue)
+
+        for issue in self.blogBase["singeListJson"].values():
+            self.createPostHtml(issue)
+
+        self.createPlistHtml()
+        self.createFeedXml()
+        print("====== create static html end ======")
+
+    def runOne(self,number_str):
+        print("====== start create static html ======")
+        issue=self.repo.get_issue(int(number_str))
+        if issue.state == "open":
+            listJsonName=self.addOnePostJson(issue)
+            self.createPostHtml(self.blogBase[listJsonName]["P"+number_str])
+            self.createPlistHtml()
+            self.createFeedXml()
+            print("====== create static html end ======")
+        else:
+            print("====== issue is closed ======")
+
+    def createFileName(self,issue,useLabel=False):
+        if useLabel==True:
+            fileName=issue.labels[0].name
+        else:
+            if self.blogBase["urlMode"]=="issue":
+                fileName=str(issue.number)
+            elif self.blogBase["urlMode"]=="ru_translit": 
+                fileName=str(translit(issue.title, language_code='ru', reversed=True)).replace(' ', '-')
+            else:
+                fileName=Pinyin().get_pinyin(issue.title)
+        
+        fileName=re.sub(r'[<>:/\\|?*\"]|[\0-\31]', '-', fileName)
+        return fileName
+
+######################################################################################
+parser = argparse.ArgumentParser()
+parser.add_argument("github_token", help="github_token")
+parser.add_argument("repo_name", help="repo_name")
+parser.add_argument("--issue_number", help="issue_number", default=0, required=False)
+options = parser.parse_args()
+
+blog=GMEEK(options)
+
+if not os.path.exists("blogBase.json"):
+    print("blogBase is not exists, runAll")
+    blog.runAll()
+else:
+    if os.path.exists(blog.root_dir+'rss.xml'):
+        oldFeedFile=open(blog.root_dir+'rss.xml','r',encoding='utf-8')
+        blog.oldFeedString=oldFeedFile.read()
+        oldFeedFile.close()
+    if options.issue_number=="0" or options.issue_number=="":
+        print("issue_number=='0', runAll")
+        blog.runAll()
+    else:
+        f=open("blogBase.json","r")
+        print("blogBase is exists and issue_number!=0, runOne")
+        oldBlogBase=json.loads(f.read())
+        for key, value in oldBlogBase.items():
+            blog.blogBase[key] = value
+        f.close()
+        blog.blogBase["labelColorDict"]=blog.labelColorDict
+        blog.runOne(options.issue_number)
+
+listFile=open("blogBase.json","w")
+listFile.write(json.dumps(blog.blogBase))
+listFile.close()
+
+commentNumSum=0
+wordCount=0
+print("====== create postList.json file ======")
+blog.blogBase["postListJson"]=dict(sorted(blog.blogBase["postListJson"].items(),key=lambda x:x[1]["createdAt"],reverse=True))#使列表由时间排序
+for i in blog.blogBase["postListJson"]:
+    del blog.blogBase["postListJson"][i]["description"]
+    del blog.blogBase["postListJson"][i]["postSourceUrl"]
+    del blog.blogBase["postListJson"][i]["htmlDir"]
+    del blog.blogBase["postListJson"][i]["createdAt"]
+    del blog.blogBase["postListJson"][i]["script"]
+    del blog.blogBase["postListJson"][i]["style"]
+    del blog.blogBase["postListJson"][i]["top"]
+    del blog.blogBase["postListJson"][i]["ogImage"]
+
+    if 'head' in blog.blogBase["postListJson"][i]:
+        del blog.blogBase["postListJson"][i]["head"]
+
+    if 'commentNum' in blog.blogBase["postListJson"][i]:
+        commentNumSum=commentNumSum+blog.blogBase["postListJson"][i]["commentNum"]
+        del blog.blogBase["postListJson"][i]["commentNum"]
+
+    if 'wordCount' in blog.blogBase["postListJson"][i]:
+        wordCount=wordCount+blog.blogBase["postListJson"][i]["wordCount"]
+        del blog.blogBase["postListJson"][i]["wordCount"]
+
+blog.blogBase["postListJson"]["labelColorDict"]=blog.labelColorDict
+
+docListFile=open(blog.root_dir+"postList.json","w")
+docListFile.write(json.dumps(blog.blogBase["postListJson"]))
+docListFile.close()
 
 if os.environ.get('GITHUB_EVENT_NAME')!='schedule':
     print("====== update readme file ======")
